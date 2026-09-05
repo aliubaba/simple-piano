@@ -1,8 +1,10 @@
 package com.example.simplepiano
 
+import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioTrack
+import android.media.SoundPool
 import android.os.Bundle
 import android.util.TypedValue
 import android.view.MotionEvent
@@ -14,11 +16,39 @@ import androidx.appcompat.app.AppCompatActivity
 class MainActivity : AppCompatActivity() {
     private val sampleRate = 44100
     private val activeControllers = mutableMapOf<Int, AudioTrackController>()
+    private val activeStreams = mutableMapOf<Int, Int>()
     private var volume = 0.6f
+
+    private var soundPool: SoundPool? = null
+    private val sampleMap = mutableMapOf<Int, Int>() // midi -> soundId
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+
+        // Init SoundPool
+        val attrs = AudioAttributes.Builder()
+            .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+            .setUsage(AudioAttributes.USAGE_MEDIA)
+            .build()
+        soundPool = SoundPool.Builder().setAudioAttributes(attrs).setMaxStreams(12).build()
+
+        // Try loading samples named note{midi}.wav in res/raw, e.g. note60.wav
+        val startMidi = 60 // C4
+        val keyCount = 24
+        var loadedAny = false
+        for (i in 0 until keyCount) {
+            val midi = startMidi + i
+            val resName = "note$midi"
+            val resId = resources.getIdentifier(resName, "raw", packageName)
+            if (resId != 0) {
+                val sid = soundPool?.load(this, resId, 1) ?: 0
+                if (sid != 0) {
+                    sampleMap[midi] = sid
+                    loadedAny = true
+                }
+            }
+        }
 
         val container = findViewById<LinearLayout>(R.id.keyboardContainer)
         val seekBar = findViewById<SeekBar>(R.id.volumeSeek)
@@ -27,12 +57,10 @@ class MainActivity : AppCompatActivity() {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                 volume = progress / 100f
             }
+
             override fun onStartTrackingTouch(seekBar: SeekBar?) {}
             override fun onStopTrackingTouch(seekBar: SeekBar?) {}
         })
-
-        val startMidi = 60 // C4
-        val keyCount = 24
 
         for (i in 0 until keyCount) {
             val midi = startMidi + i
@@ -57,16 +85,36 @@ class MainActivity : AppCompatActivity() {
                 val mapKey = (v.hashCode() shl 16) or pointerId
                 when (event.actionMasked) {
                     MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
-                        if (!activeControllers.containsKey(mapKey)) {
-                            val controller = AudioTrackController(freq.toFloat(), volume)
-                            controller.play()
-                            activeControllers[mapKey] = controller
-                            v.alpha = 0.6f
+                        if (!activeControllers.containsKey(mapKey) && !activeStreams.containsKey(mapKey)) {
+                            // If sample exists for this midi, use SoundPool sustained play (loop=-1) and stop on release
+                            val sampleId = sampleMap[midi]
+                            if (sampleId != null) {
+                                val sid = soundPool?.play(sampleId, volume, volume, 1, -1, 1f) ?: 0
+                                if (sid != 0) {
+                                    activeStreams[mapKey] = sid
+                                    v.alpha = 0.6f
+                                } else {
+                                    // fallback
+                                    val controller = AudioTrackController(freq.toFloat(), volume)
+                                    controller.play()
+                                    activeControllers[mapKey] = controller
+                                    v.alpha = 0.6f
+                                }
+                            } else {
+                                val controller = AudioTrackController(freq.toFloat(), volume)
+                                controller.play()
+                                activeControllers[mapKey] = controller
+                                v.alpha = 0.6f
+                            }
                         }
                         true
                     }
                     MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP, MotionEvent.ACTION_CANCEL -> {
                         activeControllers.remove(mapKey)?.stop()
+                        val streamId = activeStreams.remove(mapKey)
+                        if (streamId != null) {
+                            try { soundPool?.stop(streamId) } catch (_: Throwable) {}
+                        }
                         v.alpha = 1.0f
                         true
                     }
@@ -75,6 +123,11 @@ class MainActivity : AppCompatActivity() {
             }
 
             container.addView(keyView)
+        }
+
+        // If no samples loaded, soundPool will be unused and app uses synthesis fallback
+        if (sampleMap.isNotEmpty()) {
+            // optional: notify user samples are used (not implemented UI-wise)
         }
     }
 
@@ -89,6 +142,8 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
         for ((_, c) in activeControllers) c.stop()
         activeControllers.clear()
+        soundPool?.release()
+        soundPool = null
     }
 
     inner class AudioTrackController(private val freq: Float, initVol: Float) {

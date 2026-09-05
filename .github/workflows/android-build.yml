@@ -1,0 +1,46 @@
+name: Android CI - build debug APK
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        distribution: temurin
+        java-version: '17'
+
+    - name: Download samples (optional)
+      if: env.SAMPLE_ZIP_URL != ''
+      run: |
+        echo "Downloading sample zip from $SAMPLE_ZIP_URL"
+        mkdir -p samples_tmp
+        curl -L -o samples_tmp/samples.zip "$SAMPLE_ZIP_URL"
+        unzip -o samples_tmp/samples.zip -d samples_tmp
+        mkdir -p app/src/main/res/raw
+        # Copy wav files named note{midi}.wav into res/raw
+        find samples_tmp -type f -iname "note*.wav" -exec cp {} app/src/main/res/raw/ \;
+        ls -la app/src/main/res/raw || true
+      env:
+        SAMPLE_ZIP_URL: ${{ secrets.SAMPLE_ZIP_URL }}
+
+    - name: Grant execute for gradlew
+      run: chmod +x ./gradlew
+
+    - name: Build debug APK
+      run: ./gradlew assembleDebug --no-daemon
+
+    - name: Upload APK artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: app-debug-apk
+        path: app/build/outputs/apk/debug/app-debug.apk
